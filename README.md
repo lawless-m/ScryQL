@@ -2,15 +2,9 @@
 
 A Rust binary that embeds [Scryer Prolog](https://github.com/mthom/scryer-prolog) and [DuckDB](https://duckdb.org) so you can write **cross-system data diagnostics in Prolog** while DuckDB does the multi-source query work.
 
-The original use case: explain why a particular invoice is or isn't aligned across Sage X3, Exportmaster, and an upload pipeline — `scryql diag('1205542')` walks Postgres + Parquet + Parquet for that one ref, asserts the results as Prolog facts, runs a rule, prints a diagnostic.
+The shape of the problem: pick a single record (an invoice, an order, an account) and explain why it does or doesn't make it through some multi-step pipeline. DuckDB joins across the relevant sources, returns the rows as Prolog facts, and a rule walks them stage by stage to attribute success or failure.
 
-```text
-$ scryql --rules rules.pl --sql queries.sql --entry diag/1 1205542
-1205542:
-  invoice    cust=992565 date=2026-01-05
-  uploaded   loc=synced
-  nonzero    yes
-```
+For a runnable end-to-end walkthrough, see [`examples/orders.md`](examples/orders.md).
 
 ## Architecture
 
@@ -55,20 +49,20 @@ ScryQL is a generic engine. Domain logic lives in two files; the binary doesn't 
 ### `queries.sql` format
 
 ```sql
--- @setup           runs once at startup. Use for INSTALL / LOAD / ATTACH / CREATE VIEW.
+-- @setup           runs once at startup. Use for INSTALL / LOAD / ATTACH / CREATE VIEW
+--                  or for in-memory CREATE TABLE / INSERT, as the orders example does.
 
 -- @setup
 INSTALL postgres;
 LOAD postgres;
-ATTACH 'host=/var/run/postgresql port=5432 dbname=x3rocs user=jordan' AS pg (TYPE postgres, READ_ONLY);
-CREATE OR REPLACE VIEW upl AS SELECT document_number, location FROM pg.x3.uploaded_invoices;
+ATTACH 'host=db.example.com dbname=mydb user=ro' AS pg (TYPE postgres, READ_ONLY);
 
 -- @row              runs once per invocation. The single ? is bound to the CLI subject.
 --                   Must return ONE column: a fully-formatted Prolog clause.
 
 -- @row
-SELECT 'uploaded(''' || document_number || ''', ''' || location || ''').'
-FROM upl WHERE document_number = ?;
+SELECT 'customer(''' || id || ''', ''' || name || ''').'
+FROM pg.public.customers WHERE id = ?;
 ```
 
 The pre-formatted-clause trick comes from a typical DuckDB pattern: `SELECT 'pred(''' || col || ''').'` — DuckDB does the string concatenation and quoting, the Rust harness just appends each row to a `consult_module_string` buffer. No Rust-side templates or schema mapping.
@@ -78,24 +72,26 @@ The pre-formatted-clause trick comes from a typical DuckDB pattern: `SELECT 'pre
 ```prolog
 :- use_module(library(format)).
 
-:- dynamic(invoice/3).
-:- dynamic(uploaded/2).
-:- dynamic(nonzerolines/1).
+:- dynamic(order/4).
+:- dynamic(customer/3).
+:- dynamic(payment/2).
 
 % Side-effect mode: rule emits via format/2.
-diag(Inv) :-
-    format("~w:~n", [Inv]),
-    ( invoice(Inv, C, D) -> format("  invoice    cust=~w date=~w~n", [C, D])
-    ;                       format("  invoice    MISSING~n", []) ),
+diag(Order) :-
+    format("~w:~n", [Order]),
+    ( order(Order, C, T, D) -> format("  order    cust=~w total=~w date=~w~n", [C, T, D])
+    ;                          format("  order    MISSING~n", []) ),
     ...
 
 % Capture-result mode: rule binds R; harness prints R.
-classify(Inv, R) :-
-    ( \+ invoice(Inv, _, _) -> R = fail(no_invoice, Inv)
-    ; \+ uploaded(Inv, _)   -> R = fail(not_uploaded, Inv)
-    ; \+ nonzerolines(Inv)  -> R = fail(empty_lines, Inv)
+classify(Order, R) :-
+    ( \+ order(Order, _, _, _) -> R = fail(no_order, Order)
+    ; customer(_, _, inactive) -> R = fail(inactive_customer, Order)
+    ; underpaid                -> R = fail(underpaid, Order)
     ; R = ok ).
 ```
+
+See [`examples/orders.pl`](examples/orders.pl) for the full version.
 
 ## CLI
 
@@ -119,33 +115,22 @@ In the REPL, typing `e('XINV').` (or `e('XINV', R).` for arity 2) is intercepted
 
 ## Examples
 
-```text
-$ scryql --rules rules.pl --sql queries.sql --entry diag/1 1205542
-1205542:
-  invoice    cust=992565 date=2026-01-05
-  uploaded   loc=synced
-  nonzero    yes
+[`examples/orders.md`](examples/orders.md) is a self-contained walkthrough
+that needs no external services or production data — five seeded orders
+hitting five distinct failure modes, both side-effect and capture-result
+modes demonstrated, all output captured from real runs.
 
-$ scryql --rules rules.pl --sql queries.sql --entry classify/2 1205542
-ok
-
-$ scryql --rules rules.pl --sql queries.sql --entry classify/2 999999999
-fail(no_invoice, 999999999)
-
-$ scryql --rules rules.pl --sql queries.sql --entry diag/1
-?- diag('1205542').
-1205542:
-  invoice    cust=992565 date=2026-01-05
-  ...
-?- diag('MATCHCR43014').
-...
-?- halt.
+```sh
+cargo run --quiet -- \
+    --rules examples/orders.pl \
+    --sql   examples/orders.sql \
+    --entry diag/1 ORD-1001
 ```
 
 ## Limitations
 
 - **No foreign predicates in scryer-prolog 0.10.** The DB seam is facts-injection only — every rule sees ground unit clauses, never live DB calls. For one-row-at-a-time diagnostic this is the right shape.
-- **Naive single-quote handling.** Subjects containing single quotes break the format-string injection. Subjects in practice are alphanumeric (invoice numbers, customer codes); not yet a problem.
+- **Naive single-quote handling.** Subjects containing single quotes break the format-string injection. Subjects in practice are alphanumeric IDs; not yet a problem.
 - **Setup is a one-shot batch.** Re-running with different `--sql` re-executes setup against a fresh in-memory DuckDB; there's no caching of attaches between invocations.
 - **Bundled DuckDB ≠ system DuckDB.** Extensions installed by the bundled binary live separately from `~/.duckdb/extensions/`. Currently only `INSTALL postgres` is used; that fetches at first run and caches.
 
