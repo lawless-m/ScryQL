@@ -6,6 +6,35 @@ The shape of the problem: pick a single record (an invoice, an order, an account
 
 For a runnable end-to-end walkthrough, see [`examples/orders.md`](examples/orders.md).
 
+## Quick example
+
+```
+SELECT ref FROM invoice WHERE paid and amount > 0
+```
+
+If you run this query and don't get a ref you are expecting, which state do we have 
+* paid <> True
+* amount <= 0
+* ref not even in the table
+
+To find out one might rewrite the query so the clauses are lifted into the Tuple and look - but now we might more data to deal with.
+
+```
+SELECT ref, paid, amount > 0 as positive_amnt FROM invoice
+```
+
+Anyway, while pondering this - with someone also waiting for the answer to 'where is that invoice'
+
+I got duckdb to output horn clauses instead
+
+```
+SELECT 'invoice(''' || ref || ''', ''' || paid || ''', ''' || amount > 0 || ''').' FROM invoice
+```
+
+and used Scryer to consult: invoice('ORD-001', P, A).
+
+Which I thought was worth generalizing. So here it is.
+
 ## Architecture
 
 ```
