@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use duckdb::Connection;
+use duckdb::{Config, Connection};
 use scryer_prolog::{LeafAnswer, Machine, MachineBuilder, StreamConfig, Term};
 use std::io::{BufRead, Write};
 
@@ -58,7 +58,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("reading {}", args.sql))?;
     let (setup, rows) = split_sections(&sql_text);
 
-    let conn = Connection::open_in_memory()?;
+    let cfg = Config::default().allow_unsigned_extensions()?;
+    let conn = Connection::open_in_memory_with_flags(cfg)?;
     if !setup.is_empty() { conn.execute_batch(&setup)?; }
 
     let rules = std::fs::read_to_string(&args.rules)
@@ -234,8 +235,12 @@ fn parse_entry_call<'a>(line: &'a str, entry: &str) -> Option<&'a str> {
 /// Minimal canonical writer for terms surfaced in REPL bindings.
 fn write_term(t: &Term) -> String {
     match t {
-        Term::Atom(a)   => a.clone(),
-        Term::String(s) => format!("\"{s}\""),
+        Term::Atom(a)     => a.clone(),
+        Term::String(s)   => format!("\"{s}\""),
+        Term::Integer(i)  => format!("{i}"),
+        Term::Rational(r) => format!("{r}"),
+        Term::Float(f)    => format!("{f:?}"), // {:?} so 30.0 stays "30.0", not "30"
+        Term::Var(v)      => v.clone(),
         Term::Compound(name, args) => {
             let inner: Vec<String> = args.iter().map(write_term).collect();
             format!("{name}({})", inner.join(", "))
@@ -244,6 +249,6 @@ fn write_term(t: &Term) -> String {
             let inner: Vec<String> = items.iter().map(write_term).collect();
             format!("[{}]", inner.join(", "))
         }
-        _ => format!("{t:?}"),
+        _ => format!("{t:?}"), // fallback for non_exhaustive future variants
     }
 }
