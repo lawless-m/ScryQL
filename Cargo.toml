@@ -1,0 +1,12 @@
+[package]
+name = "scryql"
+version = "0.1.0"
+edition = "2024"
+authors = ["Matthew Heath <matthew.heath@ramsden-international.com>"]
+description = "Explainable SQL membership checks via Scryer Prolog over DuckDB"
+license = "MIT"
+
+[dependencies]
+scryer-prolog = "0.10.0"
+duckdb = { version = "1", features = ["bundled"] }
+anyhow = "1"
